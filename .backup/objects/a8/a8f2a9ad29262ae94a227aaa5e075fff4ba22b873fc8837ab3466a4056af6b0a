@@ -1,0 +1,539 @@
+package com.baining.str.manager
+
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.TimeUnit
+
+/**
+ * Root截图/录屏管理器
+ *
+ * 绕过 FLAG_SECURE 原理：
+ * - `su -c screencap` 以 root/system 身份直接调用 SurfaceFlinger 合成帧，
+ *   完全绕过应用层 SECURE窗口标志。
+ * - 内核帧缓冲备用方案：读取 /dev/graphics/fb0 原始像素数据。
+ */
+object RootCaptureManager {
+
+    private const val TAG = "RootCaptureManager"
+    private const val TIMEOUT_MS = 10000L
+
+    //── Root 检测 ──────────────────────────────────────────────
+
+    suspend fun isRooted(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            val ok = p.waitFor(3, TimeUnit.SECONDS)
+            if (!ok) { p.destroyForcibly(); return@withContext false }
+            val out = p.inputStream.bufferedReader().readText()
+            p.errorStream.bufferedReader().readText()
+            out.contains("uid=0")
+        } catch (e: Exception) { false }
+    }
+
+        // ── 截图模式 ───────────────────────────────────────────────
+    enum class CaptureMode { NORMAL, DEEP }
+
+    /**
+     * 主模式：screencap（快速，绕过 FLAG_SECURE）
+     * 深度模式：跳过 screencap，直接读内核帧缓冲（绕过对screencap API 的钩子）
+     */
+    suspend fun captureScreen(
+        outputDir: File,
+        mode: CaptureMode = CaptureMode.NORMAL,
+        quality: Int = 95,
+        context: android.content.Context? = null
+    ): CaptureResult = withContext(Dispatchers.IO) {
+            outputDir.mkdirs()
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+            val png = File(outputDir, "shot_${if (mode == CaptureMode.DEEP) "deep_" else ""}$ts.png")
+
+            if (mode == CaptureMode.DEEP) {
+                // 优先用 native DRM 工具（最强，直接读 GPU）
+                if (context != null) {
+                    val gpuResult = captureGpu(context, outputDir)
+                    if (gpuResult is CaptureResult.Success) return@withContext gpuResult
+                Log.w(TAG, "GPU native failed, fallback to deep: ${(gpuResult as CaptureResult.Error).message}")
+                }
+                return@withContext captureDeep(outputDir, ts, png)
+            }
+
+            // 主模式：首帧立即截图；仅检测到半屏黑的未完成合成帧时才短暂重试。
+            // 不在正常路径 sleep，避免为了稳定性牺牲全部截图速度。
+            val stable = captureStableFrame(png)
+            if (stable != null) {
+                addWatermark(stable)
+                return@withContext CaptureResult.Success(stable)
+            }
+
+            // 主模式 fallback → fb0
+            val fb = captureFb0(outputDir, ts)
+            if (fb != null) {
+                addWatermark(fb)
+                return@withContext CaptureResult.Success(fb)
+            }
+            png.delete()
+            CaptureResult.Error("截图失败：screencap 未返回完整帧")
+        }
+
+        /**
+     * 深度截图：绕过 SurfaceFlinger 保护Layer。
+     *
+     * 内核外挂防录屏原理：把渲染层标记为 GRALLOC_USAGE_PROTECTED，
+     * 使得 screencap 和 fb0 只能读到背景，外挂内容不可见。
+     *
+     *绕过策略（按成功率排序）：
+     * 1. disable_secure_layers prop → 让 SF忽略 secure buffer 标志（最有效）
+     * 2. force_no_secure_buffers prop → 强制全局关闭保护
+     * 3. KEYCODE_SYSRQ 硬件快照（绕过所有软件层）
+     * 4. fb0 直读（外挂未hook 内核驱动时有效）
+     * 5. DRM renderD128 GPU 输出缓冲
+     */
+    private fun captureDeep(outputDir: File, ts: String, output: File): CaptureResult {
+
+        // 方案1：通过 system property 禁用 SurfaceFlinger 的 secure layer 保护
+        // debug.sf.disable_secure_layers=1 让 SF 把 protected buffer 当普通 buffer 处理
+        Log.i(TAG, "Deep: trying disable_secure_layers")
+        val disableSecure = tryWithSecureDisabled(output)
+        if (disableSecure != null) {
+            addWatermark(disableSecure)
+            return CaptureResult.Success(disableSecure)
+        }
+
+        // 方案2: force_no_secure_buffers（部分 AOSP/ROM支持）
+        Log.i(TAG, "Deep: trying force_no_secure_buffers")
+        val forceNoSecure = tryForceNoSecureBuffers(output)
+        if (forceNoSecure != null) {
+            addWatermark(forceNoSecure)
+            return CaptureResult.Success(forceNoSecure)
+        }
+
+        // 方案3: SYSRQ 硬件截图键→ 触发内核级截图保存到 /sdcard/Pictures
+        Log.i(TAG, "Deep: trying SYSRQ hardware snapshot")
+        val sysrq = trySysrqCapture(outputDir, ts)
+        if (sysrq != null) {
+            addWatermark(sysrq)
+            return CaptureResult.Success(sysrq)
+        }
+
+        // 方案4: fb0 直读（外挂仅 hook screencap 而未 hook fb0 驱动时有效）
+        Log.i(TAG, "Deep: trying fb0")
+        val fb0 = captureFb0(outputDir, ts)
+        if (fb0 != null) {
+            addWatermark(fb0)
+            return CaptureResult.Success(fb0)
+        }
+
+        // 方案5: DRM GPU 输出缓冲
+        Log.i(TAG, "Deep: trying DRM")
+        val drm = captureDrm(outputDir, ts)
+        if (drm != null) {
+            addWatermark(drm)
+            return CaptureResult.Success(drm)
+        }
+
+        return CaptureResult.Error("深度截图失败：外挂保护层无法绕过，请尝试关闭外挂后再截图")
+    }
+
+    /**
+     * 方案1：临时禁用 SurfaceFlinger secure layer 保护
+     * 设置 prop → screencap →恢复 prop
+     */
+    private fun tryWithSecureDisabled(output: File): File? {
+        return try {
+            // 保存原始值
+            val origDisable = shell("getprop debug.sf.disable_secure_layers").out.trim()
+            val origForce = shell("getprop debug.force.no.secure.buffers").out.trim()
+
+            // 禁用保护
+            shell("setprop debug.sf.disable_secure_layers 1")
+            shell("setprop debug.force.no.secure.buffers 1")
+            // 等待 SF 响应（约一帧时间）
+            Thread.sleep(100)
+
+            // 截图
+            val r = shell("screencap -p ${output.absolutePath} && chmod 644 ${output.absolutePath}")
+
+            // 恢复原始值
+            shell("setprop debug.sf.disable_secure_layers ${origDisable.ifEmpty { "0" }}")
+            shell("setprop debug.force.no.secure.buffers ${origForce.ifEmpty { "0" }}")
+
+            if (r.ok && output.exists() && output.length() > 500) {
+                Log.i(TAG, "disable_secure_layers OK: ${output.length()} bytes")
+                output
+            } else null
+        } catch (e: Exception) {
+            Log.w(TAG, "disable_secure_layers failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 方案2：通过 persist prop 强制关闭 secure buffer
+     */
+    private fun tryForceNoSecureBuffers(output: File): File? {
+        return try {
+            // 额外 prop：hwc 级别禁用保护
+            shell("setprop persist.debug.force_no_secure_buffers 1")
+            shell("setprop vendor.gralloc.disable_protected_buffers 1")
+            Thread.sleep(80)
+            val r = shell("screencap -p ${output.absolutePath} && chmod 644 ${output.absolutePath}")
+            // 恢复
+            shell("setprop persist.debug.force_no_secure_buffers 0")
+            shell("setprop vendor.gralloc.disable_protected_buffers 0")
+
+            if (r.ok && output.exists() && output.length() > 500) output else null
+        } catch (e: Exception) { null }
+    }
+
+    /**
+     * 方案3：SYSRQ 内核快照（P键触发屏幕截图写入 /sdcard/Pictures/）
+     * 某些内核编译时开启了 CONFIG_MAGIC_SYSRQ，此方式完全绕过 Android 框架层
+     */
+    private fun trySysrqCapture(outputDir: File, ts: String): File? {
+        return try {
+            // 触发 SYSRQ-P（打印进程状态，部分 ROM 实现了屏幕截图）
+            val beforeFiles = outputDir.listFiles()?.map { it.name }?.toSet() ?: emptySet()
+            shell("echo p > /proc/sysrq-trigger 2>/dev/null || input keyevent 120")
+            Thread.sleep(1500)
+
+            // SYSRQ 截图通常保存到标准图片目录，查找新增文件
+            val screenshotDirs = listOf(
+                "/sdcard/Pictures",
+                "/sdcard/DCIM/Screenshots",
+                "/sdcard/Pictures/Screenshots",
+                outputDir.absolutePath
+            )
+            for (dir in screenshotDirs) {
+                val f = File(dir)
+                if (!f.exists()) continue
+                val newFile = f.listFiles()?.filter { it.name !in beforeFiles && it.name.endsWith(".png") }
+                    ?.maxByOrNull { it.lastModified() }
+                if (newFile != null && newFile.length() > 10000) {
+                    // 移到输出目录
+                    val dest = File(outputDir, "shot_sysrq_$ts.png")
+                    newFile.copyTo(dest, overwrite = true)
+                    Log.i(TAG, "SYSRQ capture OK: ${dest.absolutePath}")
+                    return dest
+                }
+            }
+            null
+        } catch (e: Exception) { Log.w(TAG, "SYSRQ failed: ${e.message}"); null }
+    }
+
+    /** DRM framebuffer 读取（/dev/dri/card0） */
+    private fun captureDrm(dir: File, ts: String): File? {
+        return try {
+            val raw = File(dir, "drm_$ts.raw")
+            // 用 dd 读取 DRM 显示缓冲
+            val r = shell("dd if=/dev/dri/card0 bs=4096 count=2048 of=${raw.absolutePath} 2>/dev/null; chmod 644 ${raw.absolutePath}")
+            if (!raw.exists() || raw.length() < 100_000L) { raw.delete(); return null }
+            val res = getScreenRes()
+            val w = res.first; val h = res.second
+            if (w <= 0) { raw.delete(); return null }
+            val bytes = raw.readBytes(); raw.delete()
+            // DRM 通常是 BGRA 格式
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val px = IntArray(w * h)
+            for (i in px.indices) {
+                val b = i * 4
+                if (b + 3 >= bytes.size) break
+                val blu = bytes[b].toInt() and 0xFF
+                val grn = bytes[b + 1].toInt() and 0xFF
+                val red = bytes[b + 2].toInt() and 0xFF
+                val alp = bytes[b + 3].toInt() and 0xFF
+                px[i] = (alp shl 24) or (red shl 16) or (grn shl 8) or blu
+            }
+            bmp.setPixels(px, 0, w, 0, 0, w, h)
+            val out = File(dir, "shot_drm_$ts.png")
+            out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            bmp.recycle()
+            if (out.exists() && out.length() > 1000) out else null
+        } catch (e: Exception) { Log.w(TAG, "DRM capture failed: ${e.message}"); null }
+    }
+
+    private fun captureFb0(dir: File, ts: String): File? {
+        return try {
+            val raw = File(dir, "fb0_$ts.raw")
+            val r = shell("cat /dev/graphics/fb0 > ${raw.absolutePath} && chmod 644 ${raw.absolutePath}")
+            if (!r.ok || !raw.exists() || raw.length() < 10_000L) { raw.delete(); return null }
+
+            val res = getScreenRes()
+            val w = res.first; val h = res.second
+            if (w <= 0 || h <= 0) { raw.delete(); return null }
+
+            val bytes = raw.readBytes(); raw.delete()
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val px = IntArray(w * h)
+            for (i in px.indices) {
+                val b = i * 4
+                if (b + 3 >= bytes.size) break
+                val red = bytes[b].toInt() and 0xFF
+                val grn = bytes[b + 1].toInt() and 0xFF
+                val blu = bytes[b + 2].toInt() and 0xFF
+                val alp = bytes[b + 3].toInt() and 0xFF
+                px[i] = (alp shl 24) or (red shl 16) or (grn shl 8) or blu
+            }
+            bmp.setPixels(px, 0, w, 0, 0, w, h)
+            val out = File(dir, "shot_fb0_$ts.png")
+            out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            bmp.recycle()
+            if (out.exists()) out else null
+        } catch (e: Exception) { Log.w(TAG, "fb0 failed: ${e.message}"); null }
+    }
+
+    private fun getScreenRes(): Pair<Int, Int> {
+        val r = shell("wm size")
+        val m = Regex("""(\d+)x(\d+)""").find(r.out)
+        return if (m != null) Pair(m.groupValues[1].toInt(), m.groupValues[2].toInt())
+        else Pair(1080, 2400)
+    }
+
+    // ── 录屏 ───────────────────────────────────────────────────
+
+    private var recProc: Process? = null
+    private var recFile: File? = null
+
+    val isRecording: Boolean get() = recProc?.isAlive == true
+
+        /**
+     * Bug1 修复：新增 fps 参数，screenrecord 支持 --time-limit 和帧率控制。
+     * screenrecord 本身不直接支持 --fps，但通过 --bit-rate 配合分辨率可间接控制质量。
+     * 对于 fps 限制，使用 --bugreport 标志在某些设备上有效，
+     * 更通用方案是通过 wm density 降低采样或直接传参（Android 10+ screenrecord 支持 --size）。
+     * 此处采用标准参数组合，fps 通过注释传递给日志便于排查。
+     */
+    suspend fun startRecording(
+        outputDir: File,
+        bitrateMbps: Int = 8,
+        fps: Int = 30                    // Bug1: 新增帧率参数，30或60
+    ): RecordResult = withContext(Dispatchers.IO) {
+            if (isRecording) return@withContext RecordResult.AlreadyRunning
+            outputDir.mkdirs()
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val mp4 = File(outputDir, "rec_$ts.mp4")
+            recFile = mp4
+            try {
+                // Bug1: 构建带帧率的命令。Android 10+ screenrecord 支持 --size 控制分辨率，
+                // 帧率通过码率近似控制：60fps 时码率建议翻倍以保证质量。
+                val effectiveBitrate = if (fps >= 60) bitrateMbps * 1_500_000 else bitrateMbps * 1_000_000
+                val cmd = "screenrecord --bit-rate $effectiveBitrate ${mp4.absolutePath}"
+                Log.i(TAG, "StartRecording: fps=$fps bitrate=${effectiveBitrate/1_000_000}Mbps cmd=$cmd")
+                val p = ProcessBuilder("su", "-c", cmd).apply { redirectErrorStream(false) }.start()
+                recProc = p
+                Thread.sleep(600)
+                if (!p.isAlive) {
+                    val err = p.errorStream.bufferedReader().readText()
+                    recProc = null; recFile = null
+                    return@withContext RecordResult.Error("录屏启动失败: $err")
+                }
+                RecordResult.Started(mp4)
+            } catch (e: Exception) {
+                recProc = null; recFile = null
+                RecordResult.Error(e.message ?: "未知错误")
+            }
+        }
+
+    suspend fun stopRecording(): File? = withContext(Dispatchers.IO) {
+        val p = recProc ?: return@withContext null
+        try {
+            // SIGINT 让 screenrecord 正常写入 MP4 尾部
+            shell("kill -2 \$(pidof screenrecord) 2>/dev/null || true")
+            p.waitFor(6, TimeUnit.SECONDS)
+            if (p.isAlive) p.destroyForcibly()} catch (e: Exception) { Log.w(TAG, "stop: ${e.message}") }
+        finally { recProc = null }
+        val f = recFile; recFile = null
+        f?.takeIf { it.exists() }}
+
+    // ── 水印 ───────────────────────────────────────────────────
+
+    /**
+     * 在图片右下角添加半透明水印：白柠 BN · @BNSTR
+     */
+    fun addWatermark(file: File) {
+        try {
+            val bmp = BitmapFactory.decodeFile(file.absolutePath) ?: return
+            val mutable = bmp.copy(Bitmap.Config.ARGB_8888, true)
+            val canvas = Canvas(mutable)
+            val w = mutable.width.toFloat()
+            val h = mutable.height.toFloat()
+                        val textSize = (w * 0.018f).coerceIn(14f, 36f)  // 缩小水印
+            val text = "白柠 BN · @BNSTR"
+
+            val txtPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = android.graphics.Color.argb(220, 255, 255, 255)
+                this.textSize = textSize
+                typeface = Typeface.DEFAULT_BOLD
+            }
+            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = android.graphics.Color.argb(120, 0, 0, 0)
+            }
+            val padding = textSize * 0.6f
+            val textWidth = txtPaint.measureText(text)
+            val rx = w - textWidth - padding * 2 - 20f
+            val ry = h - textSize - padding * 2 - 20f
+            val rw = textWidth + padding * 2
+            val rh = textSize + padding * 2
+
+            canvas.drawRoundRect(rx, ry, rx + rw, ry + rh, rh / 2, rh / 2, bgPaint)
+            canvas.drawText(text, rx + padding, ry + textSize + padding * 0.4f, txtPaint)
+
+            file.outputStream().use { mutable.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            mutable.recycle()
+            bmp.recycle()
+        } catch (e: Exception) {
+            Log.w(TAG, "Watermark failed: ${e.message}")
+        }
+    }
+
+// ── Native DRM 工具 ──────────────────────────────────────────
+
+    /**
+     * 调用打包的 native drm_capture 工具直接读取 GPU帧缓冲
+     * 工具从 assets 解压到 /data/data/.../cache/drm_capture 并执行
+     */
+    fun captureGpu(context: android.content.Context, outputDir: File): CaptureResult {
+        return try {
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+            val ppm = File(outputDir, "gpu_$ts.ppm")
+            val png = File(outputDir, "shot_gpu_$ts.png")
+
+            // 1. 解压 native 二进制到 cache 目录
+            val binFile = extractNativeBin(context) ?: return CaptureResult.Error("无法解压 drm_capture")
+
+            // 2. 以 root 执行
+            val r = shell("${binFile.absolutePath} ${ppm.absolutePath}; chmod 644 ${ppm.absolutePath}")
+            Log.i(TAG, "drm_capture exit=${r.ok} stderr=${r.err.take(200)}")
+
+            if (!ppm.exists() || ppm.length() < 1000) {
+                ppm.delete()
+                return CaptureResult.Error("GPU 截图失败: ${r.err.take(150)}")
+            }
+
+            // 3. PPM → PNG（用 BitmapFactory 解码 PPM）
+            val bmp = decodePpm(ppm)
+            ppm.delete()
+            if (bmp == null) return CaptureResult.Error("PPM 解码失败")
+
+            png.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            bmp.recycle()
+            if (png.exists() && png.length() > 500) {
+                                addWatermark(png)
+                Log.i(TAG, "GPU capture OK: ${png.absolutePath}")
+                CaptureResult.Success(png)
+            } else {
+                CaptureResult.Error("PNG 写入失败")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "captureGpu exception", e)
+            CaptureResult.Error(e.message ?: "GPU 截图异常")
+        }
+    }
+
+    private fun extractNativeBin(context: android.content.Context): File? {
+        return try {
+            val bin = File(context.cacheDir, "drm_capture")
+            // 每次检查 assets 版本是否更新（比较大小）
+            val assetSize = context.assets.open("drm_capture").use { it.available().toLong() }
+            if (!bin.exists() || bin.length() != assetSize) {
+                context.assets.open("drm_capture").use { input ->
+                    bin.outputStream().use { out -> input.copyTo(out) }
+                }
+                // chmod +x
+                shell("chmod 755 ${bin.absolutePath}")
+            }
+            bin
+        } catch (e: Exception) {
+            Log.e(TAG, "extractNativeBin failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 解码 PPM (P6) 格式到 Bitmap
+     * BitmapFactory 不支持 PPM，手动解析
+     */
+    private fun decodePpm(file: File): Bitmap? {
+        return try {
+            val fis = file.inputStream()
+            val reader = java.io.BufferedReader(java.io.InputStreamReader(fis))
+            val magic = reader.readLine()?.trim()
+            if (magic != "P6") { fis.close(); return null }
+            //跳过注释行
+            var line = reader.readLine()?.trim() ?: ""
+            while (line.startsWith("#")) line = reader.readLine()?.trim() ?: ""
+            val (wStr, hStr) = line.split(" ")
+            val w = wStr.toInt(); val h = hStr.toInt()
+            reader.readLine() // maxval "255"
+            // 关闭 reader，用InputStream 读剩余二进制
+            fis.close()
+
+            // 重新打开跳过 header
+            val raw = file.readBytes()
+            // 找到 "255\n" 后的像素数据起始位置
+            var headerEnd = 0
+            var newlineCount = 0
+            for (i in raw.indices) {
+                if (raw[i] == '\n'.code.toByte()) {
+                    newlineCount++
+                    if (newlineCount == 3) { headerEnd = i + 1; break }
+                }
+            }
+
+            val pixels = IntArray(w * h)
+            val dataStart = headerEnd
+            for (i in pixels.indices) {
+                val base = dataStart + i * 3
+                if (base + 2 >= raw.size) break
+                val r = raw[base].toInt() and 0xFF
+                val g = raw[base + 1].toInt() and 0xFF
+                val b = raw[base + 2].toInt() and 0xFF
+                pixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            }
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            bmp.setPixels(pixels, 0, w, 0, 0, w, h)
+            bmp
+        } catch (e: Exception) {
+            Log.w(TAG, "decodePpm failed: ${e.message}")
+            null
+        }
+    }
+
+    // ── Shell 工具 ─────────────────────────────────────────────
+
+    fun shell(cmd: String): ShellOut {
+        return try {
+            val p = ProcessBuilder("su", "-c", cmd).apply { redirectErrorStream(false) }.start()
+            val exited = p.waitFor(TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            if (!exited) { p.destroyForcibly(); return ShellOut(false, "", "timeout") }
+            val out = p.inputStream.bufferedReader().readText()
+            val err = p.errorStream.bufferedReader().readText()
+            ShellOut(p.exitValue() == 0, out, err)
+        } catch (e: IOException) { ShellOut(false, "", e.message ?: "") }
+    }
+
+    // ── 数据类─────────────────────────────────────────────────
+
+    data class ShellOut(val ok: Boolean, val out: String, val err: String)
+
+    sealed class CaptureResult {
+        data class Success(val file: File) : CaptureResult()
+        data class Error(val message: String) : CaptureResult()
+    }
+
+    sealed class RecordResult {
+        data class Started(val file: File) : RecordResult()
+        object AlreadyRunning : RecordResult()
+        data class Error(val message: String) : RecordResult()
+    }
+}

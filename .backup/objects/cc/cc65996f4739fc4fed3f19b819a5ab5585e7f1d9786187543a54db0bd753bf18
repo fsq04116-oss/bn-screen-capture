@@ -1,0 +1,248 @@
+package com.java.myapplication.service
+
+import android.annotation.SuppressLint
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.graphics.Color
+import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
+import android.os.IBinder
+import android.util.Log
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
+import android.widget.ImageButton
+import android.widget.LinearLayout
+import androidx.core.app.NotificationCompat
+import com.java.myapplication.manager.RootCaptureManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import java.io.File
+
+/**
+ * 悬浮窗服务
+ * 用原生 View 实现，避免 ComposeView 在 Service 中需要 fake Lifecycle 的问题。
+ * 液态玻璃风格：半透明磨砂背景 + 圆形按钮
+ */
+class FloatingWindowService : Service() {
+
+    companion object {
+        private const val TAG = "FloatingWindowService"
+        private const val CHANNEL_ID = "floating_channel"
+        private const val NOTIF_ID = 1002
+
+        const val ACTION_SHOW = "action.FLOAT_SHOW"
+        const val ACTION_HIDE = "action.FLOAT_HIDE"
+
+        val isFloatingVisible = MutableStateFlow(false)
+        val isRecordingState = MutableStateFlow(false)}
+
+    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var wm: WindowManager? = null
+    private var floatView: View? = null
+    private var btnRecord: ImageButton? = null
+
+    private val outputDir: File by lazy {
+        File(
+            android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_PICTURES
+            ), "ScreenCapturePro"
+        ).also { it.mkdirs() }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        createNotifChannel()
+        startForeground(NOTIF_ID, buildNotif())
+            wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_SHOW -> showFloat()
+            ACTION_HIDE -> hideFloat()
+        }
+        return START_STICKY
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onDestroy() {
+        hideFloat()
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    //── 悬浮窗构建 ────────────────────────────────────────────
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun showFloat() {
+        if (floatView != null) return
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE orWindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = 24
+            y = 220}
+
+        // 容器：圆角半透明背景（液态玻璃效果）
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(16, 20, 16, 20)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = 56f
+                setColor(Color.argb(180, 255, 255, 255)) // 半透明白setStroke(2, Color.argb(80, 255, 255, 255))
+            }
+        }
+
+        // 截图按钮
+        val btnShot = makeIconButton(
+            bgColor = Color.argb(210, 0, 122, 255), // iOS蓝
+            iconRes = android.R.drawable.ic_menu_camera
+        ) {
+            scope.launch(Dispatchers.IO) {
+                RootCaptureManager.captureScreen(outputDir)
+            }
+        }
+
+        // 录屏按钮
+        val recBtn = makeIconButton(
+            bgColor = Color.argb(210, 52, 199, 89), // iOS绿
+            iconRes = android.R.drawable.presence_video_online
+        ) {
+            scope.launch(Dispatchers.IO) {
+                if (RootCaptureManager.isRecording) {
+                    RootCaptureManager.stopRecording()
+                    isRecordingState.value = false
+                    scope.launch(Dispatchers.Main) {
+                        updateRecordBtn(false)
+                    }
+                } else {
+                    RootCaptureManager.startRecording(outputDir)
+                    isRecordingState.value = true
+                    scope.launch(Dispatchers.Main) {
+                        updateRecordBtn(true)
+                    }
+                }
+            }
+        }
+        btnRecord = recBtn
+
+        // 关闭按钮
+        val btnClose = makeIconButton(
+            bgColor = Color.argb(160, 120, 120, 130),
+            iconRes = android.R.drawable.ic_menu_close_clear_cancel
+        ) { hideFloat() }
+
+        val lp = LinearLayout.LayoutParams(52.dpPx, 52.dpPx).apply {
+            setMargins(0, 8, 0, 8)}
+        container.addView(btnShot, lp)
+        container.addView(recBtn, lp)
+        container.addView(btnClose, lp)
+
+        // 拖动逻辑
+        var startRawX = 0f; var startRawY = 0f
+        var startX = 0; var startY = 0
+        var isDragging = false
+
+        container.setOnTouchListener { v, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    startRawX = event.rawX; startRawY = event.rawY
+                    startX = params.x; startY = params.y
+                    isDragging = falsetrue
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - startRawX
+                    val dy = event.rawY - startRawY
+                    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+                        isDragging = true
+                        params.x = (startX - dx).toInt()
+                        params.y = (startY + dy).toInt()
+                        wm?.updateViewLayout(container, params)
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> isDragging
+                else -> false
+            }
+        }
+
+        floatView = container
+        try {
+            wm?.addView(container, params)
+            isFloatingVisible.value = trueLog.i(TAG, "Floating window shown")
+        } catch (e: Exception) {
+            Log.e(TAG, "addView failed: ${e.message}")
+            floatView = null
+        }
+    }
+
+    private fun hideFloat() {
+        floatView?.let {
+            try { wm?.removeView(it) } catch (_: Exception) {}
+        }
+        floatView = null
+        btnRecord = null
+        isFloatingVisible.value = false
+    }
+
+    private fun updateRecordBtn(recording: Boolean) {
+        btnRecord?.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(
+                if (recording) Color.argb(220, 255, 59, 48)// 红色录制中
+                else Color.argb(210, 52, 199, 89)
+            )
+        }
+    }
+
+    // ── 辅助：创建圆形图标按钮 ────────────────────────────────
+
+    private fun makeIconButton(bgColor: Int, iconRes: Int, onClick: () -> Unit): ImageButton {
+        return ImageButton(this).apply {
+            setImageResource(iconRes)
+            setColorFilter(Color.WHITE)
+            scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(bgColor)
+            }
+            elevation = 6f
+            setOnClickListener { onClick() }
+        }
+    }
+
+    private val Int.dpPx: Int
+        get() = (this * resources.displayMetrics.density).toInt()
+
+    // ── 通知──────────────────────────────────────────────────
+
+    private fun createNotifChannel() {
+        val ch = NotificationChannel(CHANNEL_ID, "悬浮控制栏", NotificationManager.IMPORTANCE_MIN)
+        ch.setShowBadge(false)
+        getSystemService(NotificationManager::class.java).createNotificationChannel(ch)}
+
+    private fun buildNotif(): Notification =
+        NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("悬浮控制栏运行中")
+            .setContentText("屏幕捕获 Pro悬浮窗已启动")
+            .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setOngoing(true).setSilent(true).build()
+}

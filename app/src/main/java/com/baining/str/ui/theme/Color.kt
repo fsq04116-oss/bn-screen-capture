@@ -1,0 +1,46 @@
+package com.baining.str.ui.theme
+
+import androidx.compose.ui.graphics.Color
+
+//── iOS /液态玻璃 调色板 ─────────────────────────────────────
+
+// 主色：iOS蓝
+val IosBlue       = Color(0xFF007AFF)
+val IosBlueLight= Color(0xFF4DA3FF)
+val IosBlueDark   = Color(0xFF0055CC)
+
+// 功能色
+val IosGreen      = Color(0xFF34C759)
+val IosRed        = Color(0xFFFF3B30)
+val IosOrange     = Color(0xFFFF9500)
+val IosYellow     = Color(0xFFFFCC00)
+val IosPurple     = Color(0xFFAF52DE)
+val IosTeal       = Color(0xFF5AC8FA)
+
+// 灰度系
+val IosGray1      = Color(0xFF8E8E93)
+val IosGray2      = Color(0xFFAEAEB2)
+val IosGray3      = Color(0xFFC7C7CC)
+val IosGray4      = Color(0xFFD1D1D6)
+val IosGray5      = Color(0xFFE5E5EA)
+val IosGray6      = Color(0xFFF2F2F7)
+
+// 液态玻璃效果色
+val GlassWhite    = Color(0xCCFFFFFF)   // alpha=0.8白
+val GlassDark     = Color(0xCC1C1C1E)   // alpha=0.8 暗
+val GlassStroke   = Color(0x40FFFFFF)   // 高光描边
+val GlassShadow   = Color(0x20000000)
+
+// 背景渐变（深色模式）
+val BgDark1       = Color(0xFF0A0A0F)
+val BgDark2       = Color(0xFF12121A)
+val BgDark3       = Color(0xFF1C1C2E)
+
+// 背景渐变（浅色模式）
+val BgLight1      = Color(0xFFF2F2F7)
+val BgLight2      = Color(0xFFE8E8F0)
+val BgLight3      = Color(0xFFFFFFFF)
+
+// 卡片
+val CardDark      = Color(0xFF1C1C1E)
+val CardLight     = Color(0xFFFFFFFF)

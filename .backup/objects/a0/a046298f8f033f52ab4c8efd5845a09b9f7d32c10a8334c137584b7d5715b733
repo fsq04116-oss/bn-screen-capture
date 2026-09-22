@@ -1,0 +1,116 @@
+package com.baining.str.ui.theme
+
+import androidx.compose.material3.Typography
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+import com.baining.str.R
+
+/**
+ * 自定义字体
+ * font_cn = 春联行书（中文主字体）
+ * font_en = Pwhalloween（英文装饰字体，用于大标题）
+ */
+val FontCn = FontFamily(
+    Font(R.font.font_cn, FontWeight.Normal),
+    Font(R.font.font_cn, FontWeight.Bold),Font(R.font.font_cn, FontWeight.Medium),Font(R.font.font_cn, FontWeight.SemiBold),
+)
+
+val FontEn = FontFamily(
+    Font(R.font.font_en, FontWeight.Normal),
+    Font(R.font.font_en, FontWeight.Bold),
+)
+
+// 应用主字体：中文内容用行书，英文标题用装饰字体
+val AppTypography = Typography(
+    // 大标题（App名）- 使用英文装饰字体
+    displayLarge = TextStyle(
+        fontFamily = FontEn,
+        fontWeight = FontWeight.Bold,
+        fontSize = 34.sp,
+        lineHeight = 41.sp,
+        letterSpacing = 0.37.sp
+    ),
+    displayMedium = TextStyle(
+        fontFamily = FontEn,
+        fontWeight = FontWeight.Bold,
+        fontSize = 28.sp,
+        lineHeight = 34.sp,
+        letterSpacing = 0.36.sp
+    ),
+    displaySmall = TextStyle(
+        fontFamily = FontCn,
+        fontWeight = FontWeight.Bold,
+        fontSize = 24.sp,
+        lineHeight = 32.sp,
+        letterSpacing = 0.2.sp
+    ),
+    // 标题
+    headlineLarge = TextStyle(
+        fontFamily = FontCn,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 20.sp,
+        lineHeight = 28.sp,
+        letterSpacing = 0.15.sp
+    ),
+    headlineMedium = TextStyle(
+        fontFamily = FontCn,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 17.sp,
+        lineHeight = 24.sp,
+        letterSpacing = 0.1.sp
+    ),
+    headlineSmall = TextStyle(
+        fontFamily = FontCn,
+        fontWeight = FontWeight.Medium,
+        fontSize = 15.sp,
+        lineHeight = 22.sp,
+        letterSpacing = 0.05.sp
+    ),
+    // 正文
+    bodyLarge = TextStyle(
+        fontFamily = FontCn,
+        fontWeight = FontWeight.Normal,
+        fontSize = 16.sp,
+        lineHeight = 24.sp,
+        letterSpacing = 0.15.sp
+    ),
+    bodyMedium = TextStyle(
+        fontFamily = FontCn,
+        fontWeight = FontWeight.Normal,
+        fontSize = 14.sp,
+        lineHeight = 20.sp,
+        letterSpacing = 0.1.sp
+    ),
+    bodySmall = TextStyle(
+        fontFamily = FontCn,
+        fontWeight = FontWeight.Normal,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+        letterSpacing = 0.05.sp
+    ),
+    // 标签
+    labelLarge = TextStyle(
+        fontFamily = FontCn,
+        fontWeight = FontWeight.Medium,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
+        letterSpacing = 0.05.sp
+    ),
+    labelMedium = TextStyle(
+        fontFamily = FontCn,
+        fontWeight = FontWeight.Normal,
+        fontSize = 11.sp,
+        lineHeight = 16.sp,
+        letterSpacing = 0.sp
+    ),
+    labelSmall = TextStyle(
+        fontFamily = FontCn,
+        fontWeight = FontWeight.Normal,
+        fontSize = 10.sp,
+        lineHeight = 14.sp,
+        letterSpacing = 0.sp
+    ),
+)

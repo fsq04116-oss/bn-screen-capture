@@ -1,0 +1,245 @@
+package com.baining.str
+
+import android.app.Application
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.content.SharedPreferences
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.os.IBinder
+import android.provider.Settings
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.baining.str.manager.RecordingStateHolder
+import com.baining.str.manager.RootCaptureManager
+import com.baining.str.service.FloatingWindowService
+import com.baining.str.service.ScreenCaptureService
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import java.io.File
+
+class AppViewModel(app: Application) : AndroidViewModel(app) {
+
+    //── SharedPreferences（持久化设置）────────────────────────
+    private val prefs: SharedPreferences =
+        app.getSharedPreferences("bn_prefs", Context.MODE_PRIVATE)
+
+    //── Root状态 ───────────────────────────────────────────────
+    private val _isRooted = MutableStateFlow<Boolean?>(null)
+    val isRooted: StateFlow<Boolean?> = _isRooted
+
+    //── 服务状态 ───────────────────────────────────────────────
+    private val _serviceRunning = MutableStateFlow(false)
+    val serviceRunning: StateFlow<Boolean> = _serviceRunning
+
+    private val _serviceStatus = MutableStateFlow<ScreenCaptureService.ServiceStatus>(
+        ScreenCaptureService.ServiceStatus.Idle
+    )
+    val serviceStatus: StateFlow<ScreenCaptureService.ServiceStatus> = _serviceStatus
+
+    //── Bug6：全局录屏状态，悬浮窗和主面板共享 ─────────────────
+    val globalRecording = RecordingStateHolder.isRecording
+
+    //── 悬浮窗 ────────────────────────────────────────────────
+    private val _floatEnabled = MutableStateFlow(false)
+    val floatEnabled: StateFlow<Boolean> = _floatEnabled
+    val isFloatingVisible = FloatingWindowService.isFloatingVisible
+
+    //── 最近文件 ───────────────────────────────────────────────
+    private val _recentFiles = MutableStateFlow<List<File>>(emptyList())
+    val recentFiles: StateFlow<List<File>> = _recentFiles
+
+    //── 截图模式（0=主模式 screencap，1=深度模式 fb0/DRM）────
+    private val _captureMode = MutableStateFlow(RootCaptureManager.CaptureMode.NORMAL)
+    val captureMode: StateFlow<RootCaptureManager.CaptureMode> = _captureMode
+
+    fun toggleCaptureMode() {
+        _captureMode.value = if (_captureMode.value == RootCaptureManager.CaptureMode.NORMAL)
+            RootCaptureManager.CaptureMode.DEEP
+        else
+            RootCaptureManager.CaptureMode.NORMAL
+    }
+
+    //── 录屏帧率（滑动范围 24~120fps，持久化）─────────────────
+    // screenrecord 在多数 ROM 上不能强制写入 fps；该值会驱动码率与厂商参数探测。
+    private val _fps = MutableStateFlow(prefs.getInt("fps", 30).coerceIn(24, 120))
+    val fps: StateFlow<Int> = _fps
+
+    //── 当前设备信息 ───────────────────────────────────────────
+    val deviceInfo: String = buildString {
+        append(Build.MANUFACTURER.replaceFirstChar { it.uppercase() })
+        append(" · ")
+        append(Build.MODEL)
+        append(" · Android ")
+        append(Build.VERSION.RELEASE)
+    }
+
+    val cacheDirPath: String = app.externalCacheDir?.absolutePath ?: app.cacheDir.absolutePath
+    val galleryDirPath: String = File(
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+        "ScreenCapturePro"
+    ).absolutePath
+
+    //── 码率设置（持久化）─────────────────────────────────────
+    private val _bitrateMbps = MutableStateFlow(prefs.getInt("bitrate_mbps", 8))
+    val bitrateMbps: StateFlow<Int> = _bitrateMbps
+
+    //── Bug5：自定义保存路径（持久化）────────────────────────
+    private val _saveDir = MutableStateFlow(
+        prefs.getString("save_dir", null)?.let { File(it) }?: File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                "ScreenCapturePro"
+            )
+    )
+    val saveDir: StateFlow<File> = _saveDir
+
+    //── 服务绑定 ───────────────────────────────────────────────
+    private var captureService: ScreenCaptureService? = null
+
+    private val conn = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            captureService = (binder as? ScreenCaptureService.LocalBinder)?.getService()
+            _serviceRunning.value = true
+            viewModelScope.launch {
+                captureService?.status?.collect { status ->
+                    _serviceStatus.value = status
+                    // Bug6：同步全局录屏状态
+                    when (status) {
+                        is ScreenCaptureService.ServiceStatus.Recording ->
+                            RecordingStateHolder.setRecording(true)
+                        is ScreenCaptureService.ServiceStatus.RecordSuccess -> {
+                            RecordingStateHolder.setRecording(false)
+                            refreshRecentFiles()
+                        }
+                        is ScreenCaptureService.ServiceStatus.CaptureSuccess ->
+                            refreshRecentFiles()
+                        is ScreenCaptureService.ServiceStatus.Idle ->
+                            RecordingStateHolder.setRecording(false)
+                        else -> {}
+                    }
+                }
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            captureService = null
+            _serviceRunning.value = false
+        }
+    }
+
+    init {
+        checkRoot()
+        startAndBindService()
+        refreshRecentFiles()
+    }
+
+    //── Root检测 ──────────────────────────────────────────────
+
+    private fun checkRoot() {
+        viewModelScope.launch {
+            _isRooted.value = RootCaptureManager.isRooted()
+        }
+    }
+
+    //── 服务管理 ───────────────────────────────────────────────
+
+    private fun startAndBindService() {
+        val ctx = getApplication<Application>()
+        val intent = Intent(ctx, ScreenCaptureService::class.java)
+        ctx.startForegroundService(intent)
+        ctx.bindService(intent, conn, Context.BIND_AUTO_CREATE)
+    }
+
+    fun screenshot() {
+        captureService?.doScreenshot(_saveDir.value, _captureMode.value)
+    }
+
+    /** Bug1 + Bug6：传入帧率和保存路径，开始录屏后更新全局状态 */
+    fun startRecord() {
+        captureService?.doStartRecord(_saveDir.value, _bitrateMbps.value, _fps.value)
+    }
+
+    fun stopRecord() {
+        captureService?.doStopRecord()
+    }
+
+    val isRecording: Boolean get() = RecordingStateHolder.isRecording.value
+
+    //── 悬浮窗 ────────────────────────────────────────────────
+
+    fun setFloatEnabled(enabled: Boolean) {
+        _floatEnabled.value = enabled
+        val ctx = getApplication<Application>()
+        val intent = Intent(ctx, FloatingWindowService::class.java).apply {
+            action = if (enabled) FloatingWindowService.ACTION_SHOW
+            else FloatingWindowService.ACTION_HIDE
+        }
+        ctx.startForegroundService(intent)
+    }
+
+    fun hasOverlayPermission(): Boolean =
+        Settings.canDrawOverlays(getApplication())
+
+    //── Bug1：帧率设置 ─────────────────────────────────────────
+
+    fun setFps(fps: Int) {
+        val v = if (fps >= 60) 60 else 30
+        _fps.value = v
+        prefs.edit().putInt("fps", v).apply()
+    }
+
+    //── 码率设置 ───────────────────────────────────────────────
+
+    fun setBitrate(mbps: Int) {
+        val v = mbps.coerceIn(1, 40)
+        _bitrateMbps.value = v
+        prefs.edit().putInt("bitrate_mbps", v).apply()
+    }
+
+    //── Bug5：自定义保存路径 ───────────────────────────────────
+
+    /** 接收系统目录选择器返回的 Uri，解析为 File 并持久化 */
+    fun setSaveDirFromUri(uri: Uri) {
+        val path = uri.path?.replace("/tree/primary:", "")?.let {
+            File(Environment.getExternalStorageDirectory(), it)
+        } ?: return
+        _saveDir.value = path.also { it.mkdirs() }
+        prefs.edit().putString("save_dir", path.absolutePath).apply()
+        refreshRecentFiles()
+    }
+
+    /** 直接设置路径（字符串，用于简单场景）*/
+    fun setSaveDir(dir: File) {
+        dir.mkdirs()
+        _saveDir.value = dir
+        prefs.edit().putString("save_dir", dir.absolutePath).apply()
+        refreshRecentFiles()
+    }
+
+    //── 文件列表 ───────────────────────────────────────────────
+
+    fun refreshRecentFiles() {
+        viewModelScope.launch {
+            val dir = _saveDir.value
+            val files = dir.listFiles()?.filter { it.isFile && (it.name.endsWith(".png") || it.name.endsWith(".mp4")) }
+                ?.sortedByDescending { it.lastModified() }
+                ?.take(20)
+                ?: emptyList()
+            _recentFiles.value = files
+        }
+    }
+
+    fun deleteFile(file: File) {
+        file.delete()
+        refreshRecentFiles()
+    }
+
+    override fun onCleared() {
+        try { getApplication<Application>().unbindService(conn) } catch (_: Exception) {}
+        super.onCleared()
+    }
+}

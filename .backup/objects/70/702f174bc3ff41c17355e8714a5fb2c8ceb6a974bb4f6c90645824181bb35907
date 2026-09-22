@@ -1,0 +1,162 @@
+package com.java.myapplication
+
+import android.app.Application
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.Environment
+import android.os.IBinder
+import android.provider.Settings
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.java.myapplication.manager.RootCaptureManager
+import com.java.myapplication.service.FloatingWindowService
+import com.java.myapplication.service.ScreenCaptureService
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import java.io.File
+
+class AppViewModel(app: Application) : AndroidViewModel(app) {
+
+    //── Root状态 ───────────────────────────────────────────────
+    private val _isRooted = MutableStateFlow<Boolean?>(null)
+    val isRooted: StateFlow<Boolean?> = _isRooted
+
+    // ── 服务状态 ───────────────────────────────────────────────
+    private val _serviceRunning = MutableStateFlow(false)
+    val serviceRunning: StateFlow<Boolean> = _serviceRunning
+
+    private val _serviceStatus = MutableStateFlow<ScreenCaptureService.ServiceStatus>(
+        ScreenCaptureService.ServiceStatus.Idle
+    )
+    val serviceStatus: StateFlow<ScreenCaptureService.ServiceStatus> = _serviceStatus
+
+    // ── 悬浮窗 ────────────────────────────────────────────────
+    private val _floatEnabled = MutableStateFlow(false)
+    val floatEnabled: StateFlow<Boolean> = _floatEnabled
+
+    val isFloatingVisible = FloatingWindowService.isFloatingVisible
+    val floatRecording = FloatingWindowService.isRecordingState
+
+    // ── 最近文件 ───────────────────────────────────────────────
+    private val _recentFiles = MutableStateFlow<List<File>>(emptyList())
+    val recentFiles: StateFlow<List<File>> = _recentFiles
+
+    // ── 设置项 ─────────────────────────────────────────────────
+    private val _bitrateMbps = MutableStateFlow(8)
+    val bitrateMbps: StateFlow<Int> = _bitrateMbps
+
+    // ── 服务绑定 ───────────────────────────────────────────────
+    private var captureService: ScreenCaptureService? = null
+
+    private val conn = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            captureService = (binder as? ScreenCaptureService.LocalBinder)?.getService()
+                        _serviceRunning.value = true
+            viewModelScope.launch {
+                captureService?.status?.collect { status ->
+                    _serviceStatus.value = status
+                    if (status is ScreenCaptureService.ServiceStatus.CaptureSuccess ||
+                        status is ScreenCaptureService.ServiceStatus.RecordSuccess
+                    ) {
+                        refreshRecentFiles()
+                    }
+                }
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            captureService = null
+            _serviceRunning.value = false
+        }
+    }
+
+    init {
+        checkRoot()
+        startAndBindService()
+        refreshRecentFiles()
+    }
+
+    // ── Root检测 ──────────────────────────────────────────────
+
+    private fun checkRoot() {
+        viewModelScope.launch {
+            _isRooted.value = RootCaptureManager.isRooted()
+        }
+    }
+
+    // ── 服务管理 ───────────────────────────────────────────────
+
+    private fun startAndBindService() {
+        val ctx = getApplication<Application>()
+        val intent = Intent(ctx, ScreenCaptureService::class.java)
+        ctx.startForegroundService(intent)
+        ctx.bindService(intent, conn, Context.BIND_AUTO_CREATE)
+    }
+
+    fun screenshot() {
+        captureService?.doScreenshot()
+    }
+
+    fun startRecord() {
+        captureService?.doStartRecord()
+    }
+
+    fun stopRecord() {
+        captureService?.doStopRecord()
+    }
+
+    val isRecording: Boolean get() = captureService?.isRecording == true
+
+    // ── 悬浮窗 ────────────────────────────────────────────────
+
+    fun setFloatEnabled(enabled: Boolean) {
+        _floatEnabled.value = enabled
+        val ctx = getApplication<Application>()
+        val intent = Intent(ctx, FloatingWindowService::class.java).apply {
+            action = if (enabled) FloatingWindowService.ACTION_SHOW
+            else FloatingWindowService.ACTION_HIDE
+        }
+        ctx.startForegroundService(intent)
+    }
+
+    fun hasOverlayPermission(): Boolean =
+        Settings.canDrawOverlays(getApplication())
+
+    // ── 码率 ───────────────────────────────────────────────────
+
+    fun setBitrate(mbps: Int) {
+        _bitrateMbps.value = mbps.coerceIn(1, 40)
+    }
+
+    // ── 文件列表 ───────────────────────────────────────────────
+
+    fun refreshRecentFiles() {
+        viewModelScope.launch {
+            val dir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                "ScreenCapturePro"
+            )
+            val files = dir.listFiles()
+                ?.filter { it.isFile && (it.name.endsWith(".png") || it.name.endsWith(".mp4")) }
+                ?.sortedByDescending { it.lastModified() }
+                ?.take(20)
+                ?: emptyList()
+            _recentFiles.value = files
+        }
+    }
+
+    fun deleteFile(file: File) {
+        file.delete()
+        refreshRecentFiles()
+    }
+
+    override fun onCleared() {
+        try {
+            getApplication<Application>().unbindService(conn)
+        } catch (_: Exception) {}
+        super.onCleared()
+    }
+}

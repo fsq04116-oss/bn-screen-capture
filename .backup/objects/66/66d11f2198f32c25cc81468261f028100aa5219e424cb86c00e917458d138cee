@@ -1,0 +1,75 @@
+package com.baining.str.ui.theme
+
+import android.content.Context
+import android.graphics.Typeface
+import android.os.Build
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import com.baining.str.R
+
+/**
+ * 字体提供者
+ *核心逻辑（API 29+）：
+ * 使用 Typeface.CustomFallbackBuilder 构建字符级 fallback 链：
+ *   1. 主字体 FontEn（Pwhalloween）→优先匹配 Latin 字符
+ *   2. 回退字体 FontCn（春联行书） → 匹配 CJK 字符
+ * Android 文字引擎按字形逐字查找：Latin → FontEn；CJK → FontCn，实现真正混排。
+ *
+ * API 26-28 fallback：直接使用 FontCn（系统处理 Latin fallback）。
+ */
+object FontProvider {
+
+    @Volatile
+    private var _merged: FontFamily? = null
+
+    fun getMergedFont(context: Context): FontFamily {
+        _merged?.let { return it }
+        val font = buildMergedFont(context)
+        _merged = font
+        return font
+    }
+
+    private fun buildMergedFont(context: Context): FontFamily {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return try {
+                // 构建 FontEn 字体族（主字体，含 Latin 字形）
+                val enRaw = android.graphics.fonts.Font.Builder(
+                    context.assets, "fonts/font_en.ttf"
+                ).build()
+                val enFamily = android.graphics.fonts.FontFamily.Builder(enRaw).build()
+
+                // 构建 FontCn 字体族（回退字体，含 CJK 字形）
+                val cnRaw = android.graphics.fonts.Font.Builder(
+                    context.assets, "fonts/font_cn.ttf"
+                ).build()
+                val cnFamily = android.graphics.fonts.FontFamily.Builder(cnRaw).build()
+
+                // CustomFallbackBuilder：按字符范围逐级查找
+                //顺序：FontEn → FontCn → 系统 sans-serif
+                val typeface = Typeface.CustomFallbackBuilder(enFamily)
+                    .addCustomFallback(cnFamily)
+                    .setSystemFallback("sans-serif")
+                    .build()
+
+                FontFamily(typeface)
+            } catch (e: Exception) {
+                // 加载失败时退回纯 FontCn
+                FontFamily(
+                    Font(R.font.font_cn, FontWeight.Normal),
+                    Font(R.font.font_cn, FontWeight.Bold),
+                    Font(R.font.font_cn, FontWeight.Medium),
+                    Font(R.font.font_cn, FontWeight.SemiBold),
+                )
+            }
+        } else {
+            // API 26-28：FontCn 作主字体，Latin 由系统 fallback 处理
+            return FontFamily(
+                Font(R.font.font_cn, FontWeight.Normal),
+                Font(R.font.font_cn, FontWeight.Bold),
+                Font(R.font.font_cn, FontWeight.Medium),
+                Font(R.font.font_cn, FontWeight.SemiBold),
+            )
+        }
+    }
+}

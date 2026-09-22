@@ -1,0 +1,710 @@
+package com.baining.str.ui.screen
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.baining.str.AppViewModel
+import com.baining.str.manager.RootCaptureManager
+import com.baining.str.service.ScreenCaptureService
+import com.baining.str.ui.components.GlassCard
+import com.baining.str.ui.theme.*
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.*
+
+@Composable
+fun MainScreen(vm: AppViewModel) {
+    val status by vm.serviceStatus.collectAsState()
+    val isRooted by vm.isRooted.collectAsState()
+    val recentFiles by vm.recentFiles.collectAsState()
+    val floatEnabled by vm.floatEnabled.collectAsState()
+    val bitrate by vm.bitrateMbps.collectAsState()
+    val fps by vm.fps.collectAsState()
+    val saveDir by vm.saveDir.collectAsState()
+    val isDark = isSystemInDarkTheme()
+
+    val isRecording by vm.globalRecording.collectAsState()
+    val captureMode by vm.captureMode.collectAsState()
+    val audioSource by vm.audioSource.collectAsState()
+    val bgColors = if (isDark) listOf(BgDark1, BgDark2, BgDark3) else listOf(BgLight1, BgLight2, BgLight3)
+
+    //路径输入对话框状态
+    var showPathDialog by remember { mutableStateOf(false) }
+
+    if (showPathDialog) {
+        PathInputDialog(
+            currentPath = saveDir.absolutePath,
+            onConfirm = { path ->
+                vm.setSaveDir(java.io.File(path))
+                showPathDialog = false
+            },
+            onDismiss = { showPathDialog = false }
+        )
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(colors = bgColors))
+    ) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            item { HeaderSection(isRooted = isRooted) }
+            item { DeviceInfoCard(vm.deviceInfo, vm.cacheDirPath, vm.galleryDirPath) }
+            item { StatusCard(status = status) }
+            item {
+                ActionButtonsSection(
+                    isRecording = isRecording,
+                    captureMode = captureMode,
+                    onScreenshot = { vm.screenshot() },
+                    onToggleRecord = {
+                        if (isRecording) vm.stopRecord() else vm.startRecord()
+                    },
+                    onToggleCaptureMode = { vm.toggleCaptureMode() }
+                )
+            }
+            item {
+                SettingsCard(
+                    floatEnabled = floatEnabled,
+                    bitrateMbps = bitrate,
+                    fps = fps,
+                    saveDirPath = saveDir.absolutePath,
+                    audioSource = audioSource,
+                    onFloatToggle = { enabled -> vm.setFloatEnabled(enabled) },
+                    onBitrateChange = { v -> vm.setBitrate(v) },
+                    onFpsChange = { v -> vm.setFps(v) },
+                    onAudioSourceChange = { v -> vm.setAudioSource(v) },
+                    onPickDir = { showPathDialog = true }
+                )
+            }
+            if (recentFiles.isNotEmpty()) {
+                item {
+                    Text(
+                        "最近文件",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.9f),
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+                items(recentFiles) { file ->
+                    FileItem(file = file, onDelete = { vm.deleteFile(file) })
+                }
+            }
+            item { Spacer(Modifier.height(80.dp)) }
+        }
+    }
+}
+
+//──顶部标题 ──────────────────────────────────────────────
+
+@Composable
+private fun HeaderSection(isRooted: Boolean?) {
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column {
+                Text(
+                    "白柠",
+                    style = MaterialTheme.typography.displaySmall.copy(
+                        fontFamily = FontEnDisplay
+                    ),
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onBackground
+                )
+                Text(
+                    "强制过防录屏",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = IosBlue
+                )
+            }
+            RootBadge(isRooted = isRooted)
+        }
+        Spacer(Modifier.height(8.dp))
+        // Telegram 频道标签
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(12))
+                .background(Color(0xFF229ED9).copy(alpha = 0.15f))
+                .padding(horizontal = 10.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            Text("✈", fontSize = 12.sp, color = Color(0xFF229ED9))
+            Text(
+                "Telegram: @BNSTR",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF229ED9),
+                fontWeight = FontWeight.Medium
+            )
+            Text("·", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "BN 白柠 BAINING",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun DeviceInfoCard(deviceInfo: String, cacheDir: String, galleryDir: String) {
+    GlassCard(modifier = Modifier.fillMaxWidth(), alpha = 0.08f) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.PhoneAndroid,
+                    contentDescription = null,
+                    tint = IosBlue,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "设备：$deviceInfo",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+            Text(
+                "相册目录：$galleryDir",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+            Text(
+                "缓存目录：$cacheDir",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+@Composable
+private fun RootBadge(isRooted: Boolean?) {
+    val (color, text, icon) = when (isRooted) {
+        true -> Triple(IosGreen, "已Root", Icons.Filled.CheckCircle)
+        false -> Triple(IosRed, "未Root", Icons.Filled.Cancel)
+        null -> Triple(IosGray1, "检测中", Icons.Filled.HourglassEmpty)
+    }
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20))
+            .background(color.copy(alpha = 0.18f))
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(16.dp))
+        Text(text, color = color, style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold)
+    }
+}
+
+// ── 状态卡片 ──────────────────────────────────────────────
+
+@Composable
+private fun StatusCard(status: ScreenCaptureService.ServiceStatus) {
+    val (bgColor, icon, title, subtitle) = when (status) {
+        is ScreenCaptureService.ServiceStatus.Idle ->
+            Quad(IosBlue.copy(alpha = 0.12f), Icons.Filled.RadioButtonUnchecked, "就绪", "等待操作")
+        is ScreenCaptureService.ServiceStatus.Capturing ->
+            Quad(IosOrange.copy(alpha = 0.15f), Icons.Filled.CameraAlt, "截图中", "正在捕获屏幕…")
+        is ScreenCaptureService.ServiceStatus.Recording ->
+            Quad(IosRed.copy(alpha = 0.15f), Icons.Filled.FiberManualRecord, "录屏中", "● REC")
+        is ScreenCaptureService.ServiceStatus.CaptureSuccess ->
+            Quad(IosGreen.copy(alpha = 0.15f), Icons.Filled.CheckCircle, "截图成功", status.file.name)
+        is ScreenCaptureService.ServiceStatus.RecordSuccess ->
+            Quad(IosGreen.copy(alpha = 0.15f), Icons.Filled.VideoFile, "录屏完成", status.file.name)
+        is ScreenCaptureService.ServiceStatus.Error ->
+            Quad(IosRed.copy(alpha = 0.15f), Icons.Filled.ErrorOutline, "出错", status.message.take(60))
+    }
+    GlassCard(modifier = Modifier.fillMaxWidth(), alpha = 0.12f) {
+        Row(
+            modifier = Modifier.padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Box(
+                modifier = Modifier.size(48.dp).clip(CircleShape).background(bgColor),
+                contentAlignment = Alignment.Center
+            ) {
+                val iconColor = when (status) {
+                    is ScreenCaptureService.ServiceStatus.Recording -> IosRed
+                    is ScreenCaptureService.ServiceStatus.CaptureSuccess,
+                    is ScreenCaptureService.ServiceStatus.RecordSuccess -> IosGreen
+                    is ScreenCaptureService.ServiceStatus.Error -> IosRed
+                    is ScreenCaptureService.ServiceStatus.Capturing -> IosOrange
+                    else -> IosBlue
+                }
+                Icon(icon, contentDescription = null, tint = iconColor, modifier = Modifier.size(24.dp))}
+            Column {
+                Text(title, color = MaterialTheme.colorScheme.onBackground,
+                    style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+                Text(subtitle, color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
+                    style = MaterialTheme.typography.bodySmall, maxLines = 1)
+            }
+        }
+    }
+}
+
+// ── 主操作按钮 ────────────────────────────────────────────
+
+@Composable
+private fun ActionButtonsSection(
+        isRecording: Boolean,
+    captureMode: RootCaptureManager.CaptureMode = RootCaptureManager.CaptureMode.NORMAL,
+    onScreenshot: () -> Unit,
+    onToggleRecord: () -> Unit,
+    onToggleCaptureMode: () -> Unit = {}
+) {
+    val isDeep = captureMode == RootCaptureManager.CaptureMode.DEEP
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            ActionButton(
+                modifier = Modifier.weight(1f),
+                icon = if (isDeep) Icons.Filled.LayersClear else Icons.Filled.CameraAlt,
+                label = if (isDeep) "深度截图" else "截图",
+                gradient = if (isDeep)
+                    Brush.linearGradient(listOf(IosPurple, Color(0xFFDA8FFF)))
+                else
+                    Brush.linearGradient(listOf(IosBlue, Color(0xFF5AC8FA))),
+                onClick = onScreenshot
+            )
+            ActionButton(
+                modifier = Modifier.weight(1f),
+                icon = if (isRecording) Icons.Filled.Stop else Icons.Filled.RadioButtonChecked,
+                label = if (isRecording) "停止录屏" else "开始录屏",
+                gradient = if (isRecording)
+                    Brush.linearGradient(listOf(IosRed, Color(0xFFFF6B6B)))
+                else
+                    Brush.linearGradient(listOf(IosGreen, Color(0xFF30D158))),
+                onClick = onToggleRecord
+            )
+        }
+        // 截图模式切换条
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("截图模式：", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            CaptureModeChip("主模式", !isDeep) { if (isDeep) onToggleCaptureMode() }
+            CaptureModeChip("深度模式", isDeep) { if (!isDeep) onToggleCaptureMode() }
+            if (isDeep) {
+                Text("↑绕过内核钩子", style = MaterialTheme.typography.labelSmall,
+                    color = IosPurple)
+            }
+        }
+    }
+}
+
+@Composable
+private fun CaptureModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by androidx.compose.animation.core.animateFloatAsState(
+        if (isPressed) 0.95f else 1f,
+        animationSpec = androidx.compose.animation.core.spring(stiffness = 600f),
+        label = "mode_chip"
+    )
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.scale(scale),
+        shape = RoundedCornerShape(20),
+        color = if (selected) IosPurple.copy(alpha = 0.85f)else MaterialTheme.colorScheme.surfaceVariant,
+        interactionSource = interactionSource
+    ) {
+        Text(
+            label,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.labelLarge,
+            color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+        )
+    }
+}
+
+/**
+ * Bug4修复：使用 MutableInteractionSource + collectIsPressedAsState 替换手动pressed 状态。
+ * 系统级交互源在 ACTION_DOWN 时立即触发 isPressed=true，与视觉缩放同步，消除延迟。
+ */
+@Composable
+private fun ActionButton(
+    modifier: Modifier = Modifier,
+    icon: ImageVector,
+    label: String,
+    gradient: Brush,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    // Bug4：scale 动画在 isPressed 变化时立即响应，无额外延迟
+    val scale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (isPressed) 0.94f else 1f,
+        animationSpec = androidx.compose.animation.core.spring(stiffness = 600f),
+        label = "btn_scale"
+    )
+
+    Button(
+        onClick = onClick,
+        modifier = modifier.scale(scale).height(88.dp),
+        shape = RoundedCornerShape(20.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+        contentPadding = PaddingValues(0.dp),
+        interactionSource = interactionSource
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(gradient),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(icon, contentDescription = label, tint = Color.White,
+                    modifier = Modifier.size(32.dp))
+                Text(label, color = Color.White, style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+}
+
+// ── 设置卡片 ──────────────────────────────────────────────
+
+@Composable
+private fun SettingsCard(
+    floatEnabled: Boolean,
+    bitrateMbps: Int,
+    fps: Int,
+    saveDirPath: String,
+    onFloatToggle: (Boolean) -> Unit,
+    onBitrateChange: (Int) -> Unit,
+    onFpsChange: (Int) -> Unit,
+    onPickDir: () -> Unit
+) {
+    GlassCard(modifier = Modifier.fillMaxWidth(), alpha = 0.10f) {
+        Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("设置", color = MaterialTheme.colorScheme.onBackground,
+                style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+
+            //悬浮窗开关
+            SettingsRow(
+                icon = Icons.Filled.PictureInPicture,
+                title = "悬浮控制栏",
+                subtitle = if (floatEnabled) "已启用 —屏幕边缘可拖动" else "点击以显示悬浮按钮"
+            ) {
+                Switch(
+                    checked = floatEnabled,
+                    onCheckedChange = onFloatToggle,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = IosBlue,
+                        uncheckedThumbColor = IosGray3,
+                        uncheckedTrackColor = IosGray1.copy(alpha = 0.4f)
+                    )
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+
+            // 录屏帧率：连续滑动调节，设备实际支持上限由 screenrecord/编码器决定。
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingsRow(
+                    icon = Icons.Filled.Speed,
+                    title = "录屏帧率",
+                    subtitle = "${fps} fps（24–120）"
+                ) {}
+                Slider(
+                    value = fps.toFloat(),
+                    onValueChange = { onFpsChange(it.toInt()) },
+                    valueRange = 24f..120f,
+                    steps = 95,
+                    colors = SliderDefaults.colors(
+                        thumbColor = IosBlue,
+                        activeTrackColor = IosBlue,
+                        inactiveTrackColor = IosGray1.copy(alpha = 0.3f)
+                    ),
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FpsChip(label = "30", selected = fps == 30) { onFpsChange(30) }
+                    FpsChip(label = "60", selected = fps == 60) { onFpsChange(60) }
+                    FpsChip(label = "90", selected = fps == 90) { onFpsChange(90) }
+                    FpsChip(label = "120", selected = fps == 120) { onFpsChange(120) }
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+
+            // 录屏码率
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingsRow(
+                    icon = Icons.Filled.HighQuality,
+                    title = "录屏码率",
+                    subtitle = "$bitrateMbps Mbps"
+                ) {}
+                Slider(
+                    value = bitrateMbps.toFloat(),
+                    onValueChange = { onBitrateChange(it.toInt()) },
+                    valueRange = 2f..30f,
+                    steps = 27,
+                    colors = SliderDefaults.colors(
+                        thumbColor = IosBlue,
+                        activeTrackColor = IosBlue,
+                        inactiveTrackColor = IosGray1.copy(alpha = 0.3f)
+                    ),
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+
+            // Bug5：保存路径，点击打开系统目录选择器
+            SettingsRow(
+                icon = Icons.Filled.FolderOpen,
+                title = "保存位置",
+                subtitle = saveDirPath.let {
+                    if (it.length > 38) "…" + it.takeLast(36) else it
+                },
+                onClick = onPickDir
+            ) {
+                Icon(Icons.Filled.ChevronRight, contentDescription = null,
+                    tint = IosGray1, modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+/** Bug1：帧率选择 Chip */
+@Composable
+private fun FpsChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by androidx.compose.animation.core.animateFloatAsState(
+        if (isPressed) 0.95f else 1f,
+        animationSpec = androidx.compose.animation.core.spring(stiffness = 600f),
+        label = "chip_scale"
+    )
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.scale(scale),
+        shape = RoundedCornerShape(20),
+        color = if (selected) IosBlue else MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = if (selected) 4.dp else 0.dp,
+        interactionSource = interactionSource
+    ) {
+        Text(
+            label,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.labelLarge,
+            color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+        )
+    }
+}
+
+@Composable
+private fun SettingsRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    onClick: (() -> Unit)? = null,
+    trailing: @Composable () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (onClick != null) Modifier.clickable(interactionSource = interactionSource,
+                    indication = null) { onClick() }
+                else Modifier
+            ),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.weight(1f)
+        ) {
+            Box(
+                modifier = Modifier.size(34.dp).clip(RoundedCornerShape(8.dp))    .background(IosBlue.copy(alpha = 0.2f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, contentDescription = null, tint = IosBlue, modifier = Modifier.size(18.dp))
+            }
+            Column {
+                Text(title, color = MaterialTheme.colorScheme.onBackground,
+                    style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                Text(subtitle, color = IosGray1, style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1)
+            }
+        }
+        trailing()
+    }
+}
+
+// ── 文件项────────────────────────────────────────────────
+
+@Composable
+private fun FileItem(file: File, onDelete: () -> Unit) {
+    val isVideo = file.name.endsWith(".mp4")
+    val icon = if (isVideo) Icons.Filled.VideoFile else Icons.Filled.Image
+    val color = if (isVideo) IosPurple else IosBlue
+    val sizeKb = file.length() / 1024
+    val sizeStr = if (sizeKb > 1024) "%.1f MB".format(sizeKb / 1024f) else "$sizeKb KB"
+    val dateStr = SimpleDateFormat("MM-dd HH:mm:ss", Locale.US).format(Date(file.lastModified()))
+
+    GlassCard(modifier = Modifier.fillMaxWidth(), alpha = 0.08f, cornerRadius = 14.dp) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp))
+                    .background(color.copy(alpha = 0.2f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(20.dp))
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(file.name, color = MaterialTheme.colorScheme.onBackground,
+                    style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium, maxLines = 1)
+                Text("$dateStr  ·  $sizeStr", color = IosGray1,
+                    style = MaterialTheme.typography.labelSmall)
+            }
+            IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Filled.DeleteOutline, contentDescription = "删除",
+                    tint = IosRed.copy(alpha = 0.8f), modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+// ── 辅助 ──────────────────────────────────────────────────
+
+private data class Quad<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
+private operator fun <A, B, C, D> Quad<A, B, C, D>.component1() = first
+private operator fun <A, B, C, D> Quad<A, B, C, D>.component2() = second
+private operator fun <A, B, C, D> Quad<A, B, C, D>.component3() = third
+private operator fun <A, B, C, D> Quad<A, B, C, D>.component4() = fourth
+
+// ── 路径输入对话框 ─────────────────────────────────────────
+
+@Composable
+private fun PathInputDialog(
+    currentPath: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var text by remember { mutableStateOf(currentPath) }
+    val isValid = remember(text) { text.startsWith("/") && text.length > 1 }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, tint = IosBlue) },
+        title = {
+            Text("自定义保存路径", style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.SemiBold)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("输入绝对路径，App将以 Root 权限访问该目录",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    singleLine = true,
+                    placeholder = { Text("/sdcard/Pictures/BaiNing",
+                        style = MaterialTheme.typography.bodyMedium) },
+                    isError = text.isNotEmpty() && !isValid,
+                    supportingText = if (text.isNotEmpty() && !isValid) {
+                        { Text("路径必须以 / 开头") }
+                    } else null,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = {
+                        if (isValid) onConfirm(text.trimEnd('/'))
+                    }),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = IosBlue,
+                        focusedLabelColor = IosBlue
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text("常用路径：", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    QuickPathChip("/sdcard/Pictures/BaiNing") { text = it }
+                    QuickPathChip("/sdcard/DCIM/BaiNing") { text = it }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { if (isValid) onConfirm(text.trimEnd('/')) }, enabled = isValid) {
+                Text("确定", color = if (isValid) IosBlue else IosGray3, fontWeight = FontWeight.SemiBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消", color = IosGray1) }
+        }
+    )
+}
+
+@Composable
+private fun QuickPathChip(path: String, onSelect: (String) -> Unit) {
+    Surface(
+        onClick = { onSelect(path) },
+        shape = RoundedCornerShape(8),
+        color = IosBlue.copy(alpha = 0.1f),
+        border = androidx.compose.foundation.BorderStroke(0.5.dp, IosBlue.copy(alpha = 0.3f))
+    ) {
+        Text(path.substringAfterLast("/"),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = IosBlue)
+    }
+}
